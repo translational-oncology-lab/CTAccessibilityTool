@@ -1,0 +1,146 @@
+---
+title: "simulation_insilico"
+author: "Giulia Tini"
+date: "8/23/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(RColorBrewer)
+library(tidyverse)
+
+source('index_simulation_log.R')
+```
+
+``` {r Grid and research points definition}
+# draw the grid with points: associate name, position, population
+gridpoints_base<-data.frame("Label"=rep("grid",24),"Point_name"=seq(1,24),"x"=rep(seq(2,12,by=2),each=4), 
+                            "y"=rep(seq(2,8,by=2),6), "Population"=rep(100,24))
+
+# draw the 5 research locations and associate a baseline n. of studies (5)
+research_points_base<-data.frame("Label"=rep("research",5),"Point_name"=c("A","B","D","C","E"),
+                                 "x"=c(2.5,11.5,2.5,11.5,7),
+                                 "y"=c(2.5,2.5,7.5,7.5,5),
+                                 "Studies"=rep(5,5))
+
+pplots_tot<-list()
+subs<-list("A","E",c("A","B"),c("A","C"),c("A","D"),c("A","E"),
+           c("A","B","C"),c("A","B","E"),c("A","D","E"),c("A","C","E"),
+           c("A","B","C","D"),c("A","B","C","E"), c("A","B","C","D","E"))
+
+# consider all possible combination of research sites
+cases<-c("A","E","AB","AC","AD","AE","ABC","ABE","ADE","ACE","ABCD","ABCE","ABCDE")
+
+SimCases1<-data.frame()
+```
+
+``` {r index computation on simulated configurations}
+plots_tot<-list()
+confs<-character()
+for (i in seq(1,length(subs)))
+{
+  # elements are divided for case with 10 studies.
+  rpb<-subset(research_points_base, Point_name %in% subs[[i]])
+  plots_tot[[i]]<-index_simulation_log(gridpoints_base, rpb,cases[i])
+  
+  SimCases1<-rbind(SimCases1,plots_tot[[i]][1][[1]])
+  
+  confs<-c(confs,rep(cases[i], nrow(plots_tot[[i]][1][[1]])))
+}
+
+SimCases1$Configuration<-confs
+
+```
+``` {r visualization of some confifgurations}
+plots_tot[[10]][[2]]
+plots_tot[[11]][[2]]
+plots_tot[[12]][[2]]
+
+```
+``` {r case with more population: change case ABE}
+gridpoints_base_pop<-gridpoints_base
+gridpoints_base_pop$Population[c(3,4,7,8)]<-200
+rpb<-subset(research_points_base, Point_name %in% subs[[8]])
+ABE_PL<-index_simulation_log(gridpoints_base_pop, rpb,cases[8])
+gridpoints_base_pop$Population[c(3,4,7,8)]<-50
+ABE_LL<-index_simulation_log(gridpoints_base_pop, rpb,cases[8])
+
+gridpoints_base_pop<-gridpoints_base
+#low right corner (B): 17,18,21,22
+gridpoints_base_pop$Population[c(17,18,21,22)]<-200
+rpb<-subset(research_points_base, Point_name %in% subs[[8]])
+ABE_PR<-index_simulation_log(gridpoints_base_pop, rpb,cases[8])
+
+gridpoints_base_pop$Population[c(17,18,21,22)]<-50
+ABE_LR<-index_simulation_log(gridpoints_base_pop, rpb,cases[8])
+
+### add those additional configuration to the dataset
+ABE_pop_1<-rbind(ABE_PL[[1]],ABE_LL[[1]],ABE_PR[[1]],ABE_LR[[1]])
+ABE_pop_1$Configuration<-rep(c("ABE_PL","ABE_LL","ABE_PR","ABE_LR"),each=130)
+SimCases1<-rbind(SimCases1,ABE_pop_1)
+# FINAL DATASET
+SimCases1<-SimCases1 %>% mutate(Name=paste(Configuration,Case,sep="_"))
+```
+``` {r visualization of results from in silico data}
+SimCases_only10<-SimCases1 %>% filter(Nstud==10)
+
+SimCases_only10$Configuration<-factor(SimCases_only10$Configuration, levels=c("A","E", "AB","AC","AD","AE","ABC","ABE","ADE","ACE","ABCD","ABCE","ABCDE","ABE_PL","ABE_LL","ABE_PR","ABE_LR"))
+
+#### for maximum
+SimCases_only10 %>%
+  filter(!(Configuration %in% c("A","E","ABE_PL","ABE_LL","ABE_PR","ABE_LR"))) %>%
+  filter(!(Case %in% c("A2B","2AB","A2E","2AE","B2E","2BE"))) %>%
+  group_by(Configuration) %>%
+  mutate(Maximum=max(Accessibility)) %>%
+  ggplot()+
+  geom_segment(aes(x=Configuration,xend=Configuration, y=0, yend=Maximum))+
+  geom_point(aes(x=Configuration,y=Accessibility),size=5,color="grey")+
+  geom_point(aes(x=Configuration,y=Maximum),size=5,color="mediumblue")+
+  geom_text(aes(x=Configuration,y=Maximum+0.1,label=Configuration),size=6)+
+  theme_bw(base_size=20)+
+  labs(y="Max accessibility", title="Max accessibility for simulated configurations")
+
+SimCases_only10 %>%
+  filter(Configuration %in% c("AE","ABE","ACE","ADE","ABCE","ABCDE")) %>%
+  filter(!(Case %in% c("A2B","2AB","A2E","2AE","B2E","2BE"))) %>%
+  mutate(Sites=as.factor(ifelse(Case %in% c("A","B","C","E"),1,
+                                ifelse(Case %in% c("AE","BE","CE","AB","AC","AD","BC"),2,
+                                       ifelse(Case %in% c("ABC","ABE","ADE","ACE","ABD","BCE"),3,
+                                              ifelse(Case %in% c("ABDC","ABCE","ABDE"),4, 5)))))) %>%
+  mutate(E=ifelse(Case %in% c("E","AE","BE","CE","ABE","ADE","ACE","BCE","ABCE","ABCDE"),"Yes","No")) %>%
+  group_by(Configuration) %>%
+  mutate(Maximum=max(Accessibility)) %>%
+  ggplot()+
+  geom_segment(aes(x=Configuration,xend=Configuration, y=0, yend=Maximum))+
+  geom_point(aes(x=Configuration,y=Accessibility, color=Sites, shape=E),size=5)+
+  scale_color_brewer(palette="Set1")+
+  theme_bw(base_size=20)+
+  labs(y="Accessibility", title="Accessibility in configurations with 'E'")
+
+###plot for population
+SimCases_only10$Case<-factor(SimCases_only10$Case, levels=c("A","B","E", "AB","2AB","A2B","AE",
+                                                            "2AE","A2E","BE","2BE",
+                                                            "B2E","ABE"))
+plot_population<-SimCases_only10 %>% 
+  filter(Configuration %in% c("ABE","ABE_PL","ABE_LL")) %>%
+  pivot_wider(names_from = Configuration, values_from = Accessibility)
+
+plot_population$ABE_PL[c(1:13)]<-plot_population$ABE_PL[c(14:26)]
+plot_population$ABE_LL[c(1:13)]<-plot_population$ABE_LL[c(27:39)]
+plot_population<-plot_population[c(1:13),]
+
+
+SimCases_only10 %>% 
+  filter(Configuration %in% c("ABE","ABE_PL","ABE_LL")) %>%
+  ggplot() +
+  geom_segment(data=plot_population, aes(x=Case ,xend=Case, y=ABE_LL, yend=ABE_PL), color="grey") +
+  geom_point(aes(x=Case, y=Accessibility, color=Configuration),size=5)+
+  scale_color_manual(name="Population",values = c("ABE_PL"="mediumblue","ABE" = "dodgerblue", "ABE_LL" = "skyblue"),
+                     labels=c("Base","Increased","Decreased"))+
+  labs(y="Accessibility", title="Effect of change in population on simulated data")+
+  coord_flip()+
+  theme_bw(base_size = 20)
+
+
+```

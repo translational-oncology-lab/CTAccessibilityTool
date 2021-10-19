@@ -1,0 +1,170 @@
+---
+title: "main_optimization"
+author: "Giulia Tini"
+date: "8/23/2021"
+output: html_document
+---
+
+### Optimization algorithm to define new trial locations
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(geosphere)
+library(gridExtra)
+library(sf)
+library(rnaturalearth)
+library(ggstar)
+library(tidyverse)
+library(ggpp)
+library(readxl)
+
+source('Optimize_acc_log.R')
+```
+
+``` {r upload necessary files}
+Studies <- read.csv("data/Studies.csv", stringsAsFactors=FALSE)
+Incidence_touse <- read.csv("data/Incidence_touse.csv", sep="", stringsAsFactors=FALSE)
+pop_dens_nasa <- read.csv("data/pop_dens_nasa.csv", stringsAsFactors=FALSE)
+
+#for visualization you can upload also the local and national files
+ALL_1<-read.delim("data/local_data_and_index_final.txt", stringsAsFactors=FALSE)
+NationalIndex <- read_excel("data/national_index_final.xlsx")
+```
+
+```{r fix files to use them}
+#fix studies
+col2cvt <- 8:13
+Studies[,col2cvt] <- lapply(Studies[,col2cvt],function(x){as.numeric(gsub(",", ".", x))})
+Studies_tot<-Studies %>% 
+  group_by(country, RealAddress, year, lon, lat) %>% 
+  summarise(nstudies=sum(nstudies))
+
+Studies_tot$lon<-as.numeric(Studies_tot$lon)
+Studies_tot$lat<-as.numeric(Studies_tot$lat)
+
+#fix density
+popolation_tot<-pop_dens_nasa[,c(16,20)]
+for (i in c(2,4,6,8,10))
+{
+  print(i)
+  pt<-pop_dens_nasa[,i]*pop_dens_nasa[,i+1]
+  popolation_tot<-cbind(popolation_tot,pt)
+  
+}
+
+pop_density<-popolation_tot[c(3,4,5,6,7,1,2)]
+colnames(pop_density)<-c("density_2000","density_2005","density_2010","density_2015","density_2020","lon","lat")
+
+#remove points which always have population=0
+pop_density<-subset(pop_density, !(density_2000==0 & density_2005==0 & density_2010==0 & density_2015==0 & density_2020==0))
+
+#associate lon, lat and country to the population point
+sfRegion <- cbind(st_as_sf(pop_density, coords=c('lon', 'lat'), crs=4326), "lon"=pop_density$lon,"lat"=pop_density$lat)
+sfCountry <- ne_countries(returnclass='sf')
+#pop_density_named: population for each grid point with corresponding country
+pop_density_named<- st_join(sfCountry[,c("name_long")], sfRegion)
+```
+
+# Here you should select a nation and compute its optimal location
+# Our example is given for Italy
+``` {r optimization for selected countries}
+selected<-"Italy"
+
+# define the country maps::map() name,e.g. for United Kingdom it should be UK.
+# see maps::map() for more details
+gsel<-"Italy"
+
+#compute the median of studies in 2019 and in the last 5 years
+Smed<-subset(Studies_tot, country==selected & year==2019)
+Smed1<-subset(Studies_tot, country==selected & year>2014)
+Smed1<-Smed1 %>% group_by(year) %>% summarize(med1=median(nstudies))
+
+#define the basic number of studies to add in simulation
+med_n1<-median(Smed1$med1)
+
+### FIRST STEP: define first location to optimize national index of country
+rate<-Incidence_touse$Rate[which(Incidence_touse$country==selected)]
+res<-Optimize_acc_log(pop_density_named,selected,Studies_tot,gsel,med_n1,rate)
+res_sim_log<-res[[1]]
+max_sim_log<-res[[2]]
+max_ind_sim_log<-res[[3]]
+
+#### SECOND STEP: define second location that can maximize national index
+k1<-which(res_sim_log$NI_1==sort(res_sim_log$NI_1,decreasing = TRUE)[1])
+Studies_tot1<-rbind(as.data.frame(Studies_tot),res_sim_log[k1,c(1,2,3,4,5,6)])
+res_2<-Optimize_acc_log(pop_density_named,selected,Studies_tot1,gsel,med_n1,rate)
+  
+res_sim_log_2<-res_2[[1]]
+max_sim_log_2<-res_2[[2]]
+max_ind_sim_log_2<-res_2[[3]]
+```
+
+```{r print the selected points and computation of accessibility relative increment}
+print(res_sim_log %>% slice_max(NI_1,n=1))
+
+print(res_sim_log_2 %>% slice_max(NI_1,n=1))
+
+n2019<-subset(NationalIndex, Country==selected)$`Accessibility Index 2019`
+
+rel<-c(sort(res_sim_log$NI_1,decreasing=TRUE)[1],sort(res_sim_log_2$NI_1,decreasing=TRUE)[2])
+dif<-rep(n2019,2)
+relinc<-((rel-dif)/dif)*100
+relinc<-data.frame("Country"=rep(selected,2),"Location"=c("1","1+2"),"Increment"=relinc)
+
+relinc
+```
+
+``` {r visualization}
+
+Visualization_data<-subset(ALL_1, name_long==selected)
+Visualization_data$index_simulation_1<-max_ind_sim_log
+Visualization_data$index_simulation_2<-max_ind_sim_log_2
+
+my_colours2 <- c("#f2edee","#8a79f4","#f0d359","#ff70c3","#53ecc0",
+                 "#af0043","#bae179","#ec5646","#4f9059","#af3c00")
+
+gradient_base <- my_colours2[1]
+my_gradients <- colorRampPalette(c(gradient_base,my_colours2[6]))(7)
+
+sts<-subset(Studies_tot, country==selected & year==2019)
+
+ggplot() +
+  geom_tile(data=Visualization_data,aes(x=lon,y=lat,fill=index_2019))+
+  stat_contour(data = Visualization_data, aes(x = lon, y = lat, z=index_2019,
+                                      color = ..level..)) +
+  scale_fill_gradientn(colours  = my_gradients,name="Accessibility")+
+  borders("world", regions=gsel,colour="black", fill="NA",size=1)+
+  geom_point(aes(lon, lat,size=nstudies), data = sts,alpha=0.6)+
+  geom_text_npc(aes(npcx = 0.95, npcy = 0.95, label = paste("National Index:",round(NationalIndex$`Accessibility Index 2019`[which(NationalIndex$Country==selected)],3))),size = 10)+
+  guides(color=FALSE,size=FALSE,fill=FALSE)+
+  theme_void()
+
+ggplot() +
+  geom_tile(data=Visualization_data,aes(x=lon,y=lat,fill=index_simulation_1))+
+  stat_contour(data = Visualization_data, aes(x = lon, y = lat, z=index_simulation_1,color = ..level..)
+  ) +
+  scale_fill_gradientn(colours  = my_gradients,name="Accessibility")+
+  borders("world", regions=gsel,colour="black", fill="NA",size=1)+
+  geom_point(aes(lon, lat,size=nstudies), data = sts,alpha=0.6)+
+  geom_star(aes(lon, lat), fill="yellow",data = res_sim_log %>% slice_max(NI_1,n=1), size=8)+
+  geom_label(aes(lon-1, lat-1,label=RealAddress), data = res_sim_log %>% slice_max(NI_1,n=1), size=8)+
+  geom_text_npc(aes(npcx = 0.95, npcy = 0.95, label = paste("National Index:",round(max_sim_log,3))),size = 10)+
+  guides(color=FALSE,size=FALSE,fill=FALSE)+
+  theme_void()
+
+ggplot() +
+   geom_tile(data=Visualization_data,aes(x=lon,y=lat,fill=index_simulation_2))+
+   stat_contour(data = Visualization_data, aes(x = lon, y = lat, z=index_simulation_2,color = ..level..))+
+  scale_fill_gradientn(colours  = my_gradients,name="Accessibility")+
+  borders("world", regions=gsel,colour="black", fill="NA",size=1)+
+  geom_point(aes(lon, lat,size=nstudies), data = sts,alpha=0.6)+
+  geom_star(aes(lon, lat), fill="yellow",data = res_sim_log %>% slice_max(NI_1,n=1), size=8)+
+  geom_star(aes(lon, lat), fill="yellow",data = res_sim_log_2 %>% slice_max(NI_1,n=1), size=8)+
+  geom_label(aes(lon-1, lat-1,label=RealAddress),data = res_sim_log %>% slice_max(NI_1,n=1), size=8)+
+  geom_label(aes(lon-1, lat-1,label=RealAddress), data = res_sim_log_2 %>% slice_max(NI_1,n=1), size=8)+
+  geom_text_npc(aes(npcx = 0.95, npcy = 0.95, label = paste("National Index:",round(max_sim_log_2,3))),size = 10)+
+  guides(color=FALSE,size=guide_legend(title="N.studies"))+
+  theme_void()+
+  theme(legend.position = c(0.8, 0.7),legend.title = element_text(size=20),
+        legend.text = element_text(size=15))
+
+```

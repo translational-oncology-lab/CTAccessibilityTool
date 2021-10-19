@@ -1,0 +1,214 @@
+---
+title: "Accessibility index computation"
+author: "Giulia Tini"
+date: "8/23/2021"
+output: html_document
+---
+
+# Compute the basic index, then adjust for incidence and logarithm
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(sf)
+library(rnaturalearth)
+library(tidyverse)
+library(foreach)
+library(doParallel)
+library(doSNOW)
+library(geosphere)
+
+source('compute_index.R')
+```
+
+``` {r upload necessary files}
+# import addresses of the research points
+geocoded<-read.delim("data/Geocoded_complete.txt", stringsAsFactors=FALSE)
+# import n.studies and location
+Studies <- read.csv("data/Studies.csv", stringsAsFactors=FALSE)
+#import population density for each grid point with corresponding country
+pop_dens_nasa <- read.csv("data/pop_dens_nasa.csv", stringsAsFactors=FALSE)
+# incidence rate in several countries from GLOBOCAN 2018
+Incidence_touse <- read.csv("data/Incidence_touse.csv", sep="", stringsAsFactors=FALSE)
+```
+
+```{r fix files to create unique datasets with all the data}
+#transform , of numbers in dots
+col2cvt_g <- 2:7
+geocoded[,col2cvt_g] <-lapply(geocoded[,col2cvt_g],function(x){as.numeric(gsub(",", ".", x))})
+col2cvt <- 8:13
+Studies[,col2cvt] <- lapply(Studies[,col2cvt],function(x){as.numeric(gsub(",", ".", x))})
+
+Studies_tot<-Studies %>% 
+  group_by(country, RealAddress, year, lon, lat) %>% 
+  summarise(nstudies=sum(nstudies))
+
+Studies_tot$lon<-as.numeric(Studies_tot$lon)
+Studies_tot$lat<-as.numeric(Studies_tot$lat)
+
+popolation_tot<-pop_dens_nasa[,c(16,20)]
+for (i in c(2,4,6,8,10))
+{
+  print(i)
+  pt<-pop_dens_nasa[,i]*pop_dens_nasa[,i+1]
+  popolation_tot<-cbind(popolation_tot,pt)
+  
+}
+
+pop_density<-popolation_tot[c(3,4,5,6,7,1,2)]
+colnames(pop_density)<-c("density_2000","density_2005","density_2010","density_2015","density_2020","lon","lat")
+
+#remove points which always have population=0
+pop_density<-subset(pop_density, !(density_2000==0 & density_2005==0 & density_2010==0 & density_2015==0 & density_2020==0))
+
+#associate lon, lat and country to the population point
+sfRegion <- cbind(st_as_sf(pop_density, coords=c('lon', 'lat'), crs=4326), "lon"=pop_density$lon,"lat"=pop_density$lat)
+sfCountry <- ne_countries(returnclass='sf')
+#pop_density_named: population for each grid point with corresponding country
+pop_density_named<- st_join(sfCountry[,c("name_long")], sfRegion)
+```
+
+# Here you can decide whether run our example for Italy or for all/some  countries
+```{r run the code for ALL the countries}
+# find all the countries in the population dataset
+#Countries<-unique(pop_density_named$name_long)
+#Countries<-c("Italy", "France", "United Kingdom")
+```
+
+``` {r run the example for Italy}
+Countries<-"Italy"
+```
+
+```{r first step: basic index, to run in parallel for more countries}
+numCores <- detectCores()
+numCores
+c1<-makeCluster(numCores)
+registerDoSNOW(c1)
+
+ncountries<-length(Countries)
+r_p<-foreach (i=1:ncountries, .export=c("compute_index"), .packages =c("geosphere")) %dopar%
+  {
+    #cat(paste("Starting iteration ",Countries[i],"\n"))
+    IND1<-compute_index(Countries[i],pop_density_named,Studies_tot,who="Other")
+
+    kk<-list("IND1"=IND1)
+    return(kk)
+  }
+
+stopCluster(c1)
+```
+``` {r create the complete datasets: one for local index, one for naitonal}
+ALL_1<-data.frame()
+# and one for the national index
+NI_1<-data.frame()
+
+for (i in 1:ncountries)
+{
+  ALL_1<-rbind(ALL_1,r_p[[i]]$IND1$data)
+  
+  NI_1<-rbind(NI_1,r_p[[i]]$IND1$national_index)
+}
+
+colnames(NI_1)<-paste("NI1",seq(2005,2019,by=1),sep="_")
+NI_1<-cbind("Country"=Countries,NI_1)
+```
+
+```{r  SECOND STEP: consider the incidence rate in our index}
+# we already have ALL_1 with all the accessibility for the total population on each point
+# let's divide everyhting by the appropriate incidence rate
+
+ALL_1_incidence<-ALL_1
+ALL_1_incidence$name_long[which(ALL_1_incidence$name_long=="Dem. Rep. Korea")]<-"Democratic Republic of Korea"
+for (el in unique(ALL_1_incidence$name_long))
+{
+  print(el)
+  k<-which(Incidence_touse$country==el)
+  print(k)
+  if (length(k)>0)
+  {
+    r<-Incidence_touse$Rate[k]
+    
+    ## population
+    ALL_1_incidence[which(ALL_1_incidence$name_long==el),c(2:6)]<-ALL_1_incidence[which(ALL_1_incidence$name_long==el),c(2:6)]*r
+    
+    ## accessibility
+    ALL_1_incidence[which(ALL_1_incidence$name_long==el),c(55:69)]<-ALL_1_incidence[which(ALL_1_incidence$name_long==el),c(55:69)]/r
+  }
+}
+
+#remove the countries that do not have the incidence
+ALL_1_incidence<-subset(ALL_1_incidence, name_long %in% Incidence_touse$country)
+
+# compute the national index as average per nation
+NI_1_incidence<-subset(NI_1, Country %in% Incidence_touse$country)
+
+for (el in unique(NI_1_incidence$Country))
+{
+  print(el)
+  k<-which(Incidence_touse$country==el)
+  print(k)
+  if (length(k)>0)
+  {
+    r<-Incidence_touse$Rate[k]
+    
+    # accessibility
+    NI_1_incidence[which(NI_1_incidence$Country==el),-1]<-NI_1_incidence[which(NI_1_incidence$Country==el),-1]/r
+  }
+}
+```
+
+```{r THIRD STEP: consider the log of the population with cancer and adjust the index}
+# we first define a threshold to remove grid points with less population than this
+
+Incidence_touse$threshold<-1/Incidence_touse$Rate
+
+ALL_1_incidence_log<-ALL_1_incidence
+for (el in unique(ALL_1_incidence_log$name_long))
+{
+  print(el)
+  # population 
+  ALL_1_incidence_log[which(ALL_1_incidence_log$name_long==el),c(2:6)]<-log(ALL_1_incidence_log[which(ALL_1_incidence_log$name_long==el),c(2:6)])
+  # accessibility
+  for (i in 55:69)
+  {
+    k<-ifelse(colnames(ALL_1_incidence_log)[i] %in% c("index_2005","index_2006","index_2007","index_2008","index_2009"),3,
+              ifelse(colnames(ALL_1_incidence_log)[i] %in% c("index_2010","index_2011","index_2012","index_2013","index_2014"),4,5))
+    
+    ALL_1_incidence_log[which(ALL_1_incidence_log$name_long==el),i]<-(ALL_1_incidence_log[which(ALL_1_incidence_log$name_long==el),i]*ALL_1_incidence[which(ALL_1_incidence$name_long==el),k])/ALL_1_incidence_log[which(ALL_1_incidence_log$name_long==el),k]
+  }
+}
+
+ALL_1_incidence_log<-left_join(ALL_1_incidence_log,ALL_1[,c(1,3,4,5,7,8)], by=c("name_long","lon","lat"))
+#save the orignial densities as "density_nolog_year"
+colnames(ALL_1_incidence_log)[c(70,71,72)]<-c("density_nolog_2005","density_nolog_2010","density_nolog_2015")
+#save the columns with log of the density as "density_year". We will use them for national index
+colnames(ALL_1_incidence_log)[c(3,4,5)]<-c("density_2005","density_2010","density_2015")
+
+ALL_1_incidence_log<-left_join(ALL_1_incidence_log,Incidence_touse[,c(1,5)], by=c("name_long"="country"))
+
+#remove the points with original density less than the threshold for all years
+ALL_reduced<-ALL_1_incidence_log %>%
+  filter(density_nolog_2005>threshold & density_nolog_2010>threshold & density_nolog_2015>threshold)
+
+# fix the national index to consider the log
+NI_incidence_log<-ALL_reduced %>%
+  group_by(name_long) %>%
+  summarize(NI_2005=sum(index_2005*density_2005)/sum(density_2005),
+            NI_2006=sum(index_2006*density_2005)/sum(density_2005),
+            NI_2007=sum(index_2007*density_2005)/sum(density_2005),
+            NI_2008=sum(index_2008*density_2005)/sum(density_2005),
+            NI_2009=sum(index_2009*density_2005)/sum(density_2005),
+            NI_2010=sum(index_2010*density_2010)/sum(density_2010),
+            NI_2011=sum(index_2011*density_2010)/sum(density_2010),
+            NI_2012=sum(index_2012*density_2010)/sum(density_2010),
+            NI_2013=sum(index_2013*density_2010)/sum(density_2010),
+            NI_2014=sum(index_2014*density_2010)/sum(density_2010),
+            NI_2015=sum(index_2015*density_2015)/sum(density_2015),
+            NI_2016=sum(index_2016*density_2015)/sum(density_2015),
+            NI_2017=sum(index_2017*density_2015)/sum(density_2015),
+            NI_2018=sum(index_2018*density_2015)/sum(density_2015),
+            NI_2019=sum(index_2019*density_2015)/sum(density_2015))
+```
+
+```{r visualization of results}
+print(NI_incidence_log$NI_2019)
+```

@@ -1,0 +1,200 @@
+---
+title: "Download_and_preprocessing"
+author: "Giulia Tini"
+date: "8/23/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(RPostgreSQL)
+library(RPostgres)
+library(DBI)
+library(tidyverse)
+library(data.table)
+```
+
+``` {r upload useul files}
+citynames <- read.csv2("data/citynames.csv", stringsAsFactors=FALSE)
+geocoded<-read.delim("data/Geocoded_complete.txt", stringsAsFactors=FALSE)
+
+```
+
+```{r open connection to the database, afrer registration}
+#insert your useraname and password as usname and pwd
+drv <- dbDriver('PostgreSQL')
+con <- dbConnect(drv, dbname="aact",host="aact-db.ctti-clinicaltrials.org", port=5432, user=usname, password=pwd)
+
+studies <- dbGetQuery(con, 'SELECT * FROM studies')
+sponsors<-dbGetQuery(con, 'SELECT * FROM sponsors')
+conditions<-dbGetQuery(con, 'SELECT * FROM conditions')
+facilities<-dbGetQuery(con, 'SELECT * FROM facilities')
+
+print(paste("Total studies: ",nrow(studies)))
+```
+
+```{r find cancer studies}
+cancer_ids <- conditions %>%
+  filter(grepl("cancer|tumor|tumour|sarcoma|blastoma|lymphoma|carcinoma|melanoma|neoplasm|mesothelioma|myeloma", downcase_name)) %>%
+  .$nct_id 
+
+print(paste("Total cancer studies: ",length(cancer_ids)))
+```
+
+```{r find interventional studies and add sponsor}
+a<- studies %>%
+  filter(nct_id %in% cancer_ids, study_type == "Interventional" )
+
+#total cancer studies that are interventional
+print(paste("Total cancer interventional studies: ",nrow(a)))
+
+#join the two subset and add the sponsor
+b <- sponsors %>%
+  filter(nct_id %in% cancer_ids)
+
+c <- inner_join(a, b, by = "nct_id")
+
+# consider just those with "lead": it menas considering unique trials and we need just this for consequent analysis
+cancer_interv_lead <- c%>%
+  filter(lead_or_collaborator== "lead")
+```
+
+``` {r create column with date and year}
+cancer_comp_table <- cancer_interv_lead %>%
+  mutate(sub_date = as.Date(study_first_submitted_date, format = "%Y-%m-%d"))%>%
+  mutate(year= lubridate::year(sub_date))
+```
+
+```{r define locations for each clinical trials}
+added_locations<- inner_join(cancer_comp_table, facilities, by = "nct_id")
+
+#retain only those between 2005 and 2019
+added_locations<-added_locations %>% filter(year %in% seq(2005,2019))
+
+print("Total couples trial-location: ",length(unique(added_locations$nct_id)))
+
+#fix some of the names to be consistent with other datasets
+added_locations$country[which(added_locations$country=="Czechia")]<-"Czech Republic"
+added_locations$country[which(added_locations$country=="Iran, Islamic Republic of")]<-"Iran"
+added_locations$country[which(added_locations$country=="Korea, Republic of")]<-"Republic of Korea"
+added_locations$country[which(added_locations$country=="Moldova, Republic of")]<-"Moldova"
+
+###consider also continent
+Africa <- c("Algeria",  "Egypt",  "South Africa",   "Tunisia",  "Nigeria",  "Rwanda", "Tanzania",
+            "Uganda", "Zimbabwe","Angola","Burundi","Benin","Burkina Faso","Kenya","Niger","Zambia","Libya",
+            "Morocco","Malawi","Mali","Sudan","Botswana","Cameroon","Central African Republic","Democratic Republic of the Congo",
+            "Côte d'Ivoire","Republic of Congo","Djibouti","Eritrea","Ghana","Ethiopia","Gabon","The Gambia","South Sudan",
+            "Senegal","Sierra Leone","Somalia","Chad","Lesotho","Mozambique","Madagascar","Guinea-Bissau","Namibia",
+            "Western Sahara","Swaziland","Liberia","Mauritania","Guinea","Equatorial Guinea","Somaliland","Togo"
+)
+Europe <- c("Macedonia","Montenegro","Kosovo","Albania", "Austria" , "Belarus", "Belgium", "Bosnia and Herzegovina", "Bulgaria" , "Croatia",
+            "Czech Republic" ,   "Denmark", "Estonia"  ,"Finland", 
+            "France", "Germany"   , "Greece"  , "Hungary" , "Iceland"  ,"Ireland", "Italy", "Latvia",
+            "Lithuania"  , "Luxembourg", "Moldova" ,"Netherlands", "Norway", "Poland"  ,
+            "Portugal" ,  "Romania" , "Russian Federation"  , "Serbia", "Slovakia" , "Slovenia" ,"Spain"  ,
+            "Sweden"   ,"Switzerland"  , "Ukraine" , "United Kingdom" , "Cyprus","French Southern and Antarctic Lands"
+            ,"Antarctica", "Greenland")
+Asia <-c("Indonesia","Cambodia","Palestine","Azerbaijan","Armenia","Afghanistan","China", "Dem. Rep. Korea",
+         "Iran", "Nepal","Syria","Tajikistan", "Bhutan" ,
+         "Israel",   "India",  "Bangladesh","Yemen" ,"Uzbekistan" ,"Qatar","Iraq",
+         "Japan",  "Jordan","Kazakhstan",  "Republic of Korea", "Lebanon", "Malaysia", 
+         "Mongolia", "Pakistan",  "Saudi Arabia",  "Taiwan",   "Thailand","Turkey",  "Vietnam",
+         "Philippines","United Arab Emirates","Georgia","Northern Cyprus","Myanmar","Oman","Turkmenistan","Sri Lanka",
+         "Kyrgyzstan","Kuwait","Lao PDR","Brunei Darussalam","Timor-Leste" )
+SouthAmerica <- c("Argentina",   "Brazil",  "Chile", "Colombia", "Costa Rica",  "Peru",   "Puerto Rico",
+                  "Venezuela", "Suriname","Trinidad and Tobago",  "Falkland Islands",
+                  "Bolivia","Ecuador","Guyana","Paraguay","Uruguay")
+CentralAmerica<-c("Cuba","Bahamas","Guatemala", "Mexico", "Belize","Honduras","El Salvador","Haiti",
+                  "Nicaragua","Panama","Jamaica","Dominican Republic")
+NorthAmerica <- c("United States", "Canada")
+Oceania <- c("Australia",  "New Zealand","New Caledonia","Fiji","Vanuatu","Papua New Guinea","Solomon Islands")
+
+continents<-data.frame("Country"=c(Europe,Africa,Asia,NorthAmerica,SouthAmerica,CentralAmerica,Oceania),
+                       "Continent"=c(rep("Europe",length(Europe)),rep("Africa",length(Africa)),rep("Asia",length(Asia)),
+                                     rep("USA and Canada",length(NorthAmerica)),rep("America (no USA,Canada)", length(SouthAmerica)+length(CentralAmerica)),
+                                     rep("Oceania",length(Oceania))))
+
+added_locations<-merge(added_locations, continents, by.x="country", by.y="Country")
+
+```
+
+```{r aggregate studies}
+#aggregate studies by country
+studies_by_country<- added_locations %>%
+  group_by(agency_class, Continent, country, year)%>%
+  summarize(nstudies = n())
+studies_by_country$country <- as.factor(studies_by_country$country)
+
+#group studies by continent, agency and year
+continent_table <- studies_by_country %>%
+  group_by(Continent, agency_class,
+           year)%>%
+  summarize(nstudies = sum(nstudies))
+
+continent_table <- as.data.frame(continent_table)
+```
+
+```{r create dataframe with complete address, lat, long}
+#This will be useful to compute distances
+added_address<-as_tibble(added_locations) %>% 
+  mutate(address=paste(city,country,sep=", "))
+
+### to compute distance we need the correct geolocation (lat, long) for the addresses
+# fill empty spaces in the file
+for (i in 1:nrow(citynames))
+{
+  if (is.na(citynames$Real[i])==FALSE)
+    if (citynames$Real[i]=="")
+      citynames$Real[i]<-citynames$Address[i]
+}
+
+# fix the data with double name and same location
+queries<-as.data.frame(table(geocoded_complete$geometry))
+q_more<-queries$Var1[which(queries$Freq>1)]
+
+for (el in q_more)
+{
+  kk<-which(geocoded_complete$geometry==el)
+  print(geocoded_complete$query[kk])
+  names<-geocoded_complete$query[kk]
+  
+  kl<-which(citynames$Real %in% (names[-1]))
+  if (length(kl)>0)
+    citynames$Real[kl]<-names[1]
+}
+
+#now, associate to each address the correct cityname
+useful<-character()
+for (i in c(1:nrow(added_address)))
+{
+  k<-which(citynames$Address==added_address$address[i])[1]
+  
+  if(length(k)==0)
+  {
+    print(i)
+    print(added_address$address[i])
+    useful<-c(useful, NA)
+  }else
+    useful<-c(useful, citynames$Real[k])
+  #print(citynames$Real[k])
+}
+
+added_address<-data.frame(cbind(added_address, RealAddress=useful))
+```
+
+```{r create new datasets with address grouped by interesting variables}
+studies_by_city<-added_address %>%
+  group_by(agency_class, Continent, country, RealAddress, year) %>% #city,address, country,  year)%>%
+  summarize(nstudies = n())
+
+# save also subregions and enrollment, when available
+studies_by_city2_state<-added_address %>%
+  group_by(agency_class, Continent, country, RealAddress, year) %>%
+  summarise(nstudies = n(), total_enrollment=sum(enrollment, na.rm=TRUE))
+
+studies_density2_state<-merge(studies_by_city2_state, geocoded_complete, by.x="RealAddress", by.y="query")
+
+#save file for later use
+#write.csv(studies_density2_state,"data/Studies.csv",row.names = FALSE)
+```
+
